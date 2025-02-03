@@ -1,0 +1,64 @@
+---
+- name: Automate Database Backup
+  hosts: db_servers  # The target hosts for the playbook (db_servers group in inventory)
+  become: yes  # Run tasks with elevated privileges (root)
+  
+  # Reference to an external file containing sensitive variables, like passwords
+  vars_files:
+    - vault.yaml  # The encrypted file containing sensitive data (e.g., db_password)
+
+  # Regular variables that are not sensitive
+  vars:
+    backup_dir: "/var/backups/db"  # Directory where backups will be stored
+    retention_days: 7  # Number of days to keep the backups before deletion
+    db_user: "dbuser"  # Database user (non-sensitive)
+    db_name: "mydatabase"  # The database name to back up
+    cloud_storage: false  # Set to true to enable cloud backup to AWS S3
+    cloud_dest: "s3://mybucket/db_backups"  # Destination for cloud backup if enabled
+
+  tasks:
+    # Task 1: Ensure the backup directory exists
+    - name: Ensure backup directory exists
+      file:
+        path: "{{ backup_dir }}"  # The directory defined in the vars section
+        state: directory  # Ensure the directory exists
+        mode: '0755'  # Set directory permissions to read/write/execute for owner, read/execute for others
+
+    # Task 2: Perform the database backup using mysqldump
+    - name: Perform database backup
+      command: >
+        mysqldump -u {{ db_user }} -p{{ db_password }} {{ db_name }} > {{ backup_dir }}/backup_$(date +%F).sql
+        # Run mysqldump to back up the database to a file in the backup directory
+        # Filename format will be backup_YYYY-MM-DD.sql based on the current date
+      args:
+        creates: "{{ backup_dir }}/backup_$(date +%F).sql"  # Prevents running the command if the backup already exists for the day
+
+    # Task 3: Upload backup to cloud storage (if cloud_storage is enabled)
+    - name: Upload backup to cloud (if enabled)
+      command: >
+        aws s3 cp {{ backup_dir }}/backup_$(date +%F).sql {{ cloud_dest }}
+        # Upload the backup file to the cloud (AWS S3) if cloud_storage is enabled
+      when: cloud_storage  # This task will only run if cloud_storage is true
+
+    # Task 4: Delete old backups that exceed retention_days
+    - name: Delete old backups
+      find:
+        path: "{{ backup_dir }}"  # Look for files in the backup directory
+        pattern: "backup_*.sql"  # Look for backup files with the pattern 'backup_*.sql'
+        age: "{{ retention_days }}d"  # Find files older than retention_days
+      register: old_backups  # Store the list of old backups in the 'old_backups' variable
+
+    # Task 5: Remove the old backup files that are older than the retention period
+    - name: Remove old backups
+      file:
+        path: "{{ item.path }}"  # Path of each old backup found in the previous task
+        state: absent  # Remove the file
+      loop: "{{ old_backups.files }}"  # Loop through each file found in 'old_backups'
+
+    # Task 6: Schedule the backup process to run periodically via cron
+    - name: Schedule backup via cron
+      cron:
+        name: "Database Backup"  # Name of the cron job for identification
+        job: "ansible-playbook /path/to/this/playbook.yml"  # Command to run the playbook to back up the database
+        minute: "0"  # Run at the start of the hour
+        hour: "2"  # Run at 2:00 AM every day
